@@ -20,10 +20,12 @@ export class SyncClient {
 
   private localClock = 0;
   private remoteClock: number = 0;
+  private lastSequence: number = 0;
 
   private reconnectAttempts = 0;
   private reconnectTimer: number | null = null;
   private connectionTimeout: number | null = null;
+  private pingInterval: number | null = null;
 
   private _isConnected = false;
   private messageQueue: SyncMessage[] = [];
@@ -51,24 +53,47 @@ export class SyncClient {
 
       request.onupgradeneeded = (event) => {
         const db = (event.target as IDBOpenDBRequest).result;
-        if (!db.objectStoreNames.contains('operations')) {
-          const store = db.createObjectStore('operations', {
-            keyPath: 'id',
-            autoIncrement: true,
-          });
-          store.createIndex('timestamp', 'timestamp', { unique: false });
-          store.createIndex('path', 'path', { unique: false });
-        }
-        if (!db.objectStoreNames.contains('state')) {
-          db.createObjectStore('state', { keyPath: 'key' });
-        }
+        this.createObjectStores(db);
       };
 
       request.onsuccess = () => {
-        this.db = request.result;
+        const db = request.result;
+        // Check if stores exist (might have old version without stores)
+        if (!db.objectStoreNames.contains('operations') || !db.objectStoreNames.contains('state')) {
+          // Need to upgrade - this is a bit of a hack but works
+          const upgradeReq = indexedDB.deleteDatabase('ObsidianSyncOffline');
+          upgradeReq.onsuccess = () => {
+            const newReq = indexedDB.open('ObsidianSyncOffline', 1);
+            newReq.onupgradeneeded = (event) => {
+              this.createObjectStores((event.target as IDBOpenDBRequest).result);
+            };
+            newReq.onsuccess = () => {
+              this.db = newReq.result;
+              resolve();
+            };
+            newReq.onerror = () => reject(newReq.error);
+          };
+          upgradeReq.onerror = () => reject(upgradeReq.error);
+          return;
+        }
+        this.db = db;
         resolve();
       };
     });
+  }
+
+  private createObjectStores(db: IDBDatabase): void {
+    if (!db.objectStoreNames.contains('operations')) {
+      const store = db.createObjectStore('operations', {
+        keyPath: 'id',
+        autoIncrement: true,
+      });
+      store.createIndex('timestamp', 'timestamp', { unique: false });
+      store.createIndex('path', 'path', { unique: false });
+    }
+    if (!db.objectStoreNames.contains('state')) {
+      db.createObjectStore('state', { keyPath: 'key' });
+    }
   }
 
   isConnected(): boolean {
@@ -76,14 +101,18 @@ export class SyncClient {
   }
 
   async connect(): Promise<void> {
-    await this.dbReady;
+    console.log('[SyncClient] Starting connect (skipping DB)...');
+    // Skip DB init to avoid IndexedDB hangs
 
     if (this.ws && (this.ws.readyState === WebSocket.CONNECTING || this.ws.readyState === WebSocket.OPEN)) {
+      console.log('[SyncClient] Already connected');
       return;
     }
 
     this.incrementClock();
     this.startConnectionTimeout();
+    
+    console.log('[SyncClient] Creating WebSocket:', this.wsUrl);
 
     try {
       this.ws = new WebSocket(this.wsUrl);
@@ -91,7 +120,9 @@ export class SyncClient {
       this.ws.onmessage = this.handleMessage.bind(this);
       this.ws.onerror = this.handleError.bind(this);
       this.ws.onclose = this.handleClose.bind(this);
+      console.log('[SyncClient] WebSocket created, waiting for open...');
     } catch (error) {
+      console.error('[SyncClient] WebSocket creation error:', error);
       this.scheduleReconnect();
       throw error;
     }
@@ -178,28 +209,56 @@ export class SyncClient {
     this._isConnected = true;
 
     this.sendHandshake();
-    this.replayOfflineOperations();
+    
+    // Handle async rejection properly 
+    this.replayOfflineOperations().catch((e) => {
+      console.warn('[SyncClient] Offline replay skipped:', e);
+    });
+
+    // Keep connection alive with periodic pings every 10 seconds
+    this.pingInterval = window.setInterval(() => {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        console.log('[SyncClient] Sending ping');
+        this.ws.send('{"type":"PING"}');
+      }
+    }, 10000);
 
     this.connectCallbacks.forEach((cb) => cb());
   }
 
   private handleMessage(event: MessageEvent): void {
     try {
-      const message: SyncMessage = JSON.parse(event.data);
+      const data = event.data;
+      
+      // Handle both string and Blob types
+      const processData = (text: string) => {
+        console.log('[SyncClient] Raw message received, length:', text.length);
+        
+        const message: SyncMessage = JSON.parse(text);
+        console.log('[SyncClient] Parsed message:', message.type, 'from:', message.client_id, 'self:', this.clientId);
 
-      // Ignore own echoed messages
-      if (message.client_id === this.clientId) {
-        return;
+        if (message.client_id === this.clientId) {
+          console.log('[SyncClient] Ignoring own message');
+          return;
+        }
+
+        if (message.vector_clock > this.remoteClock) {
+          this.remoteClock = message.vector_clock;
+        }
+
+        console.log('[SyncClient] Invoking callbacks for:', message.type);
+        this.messageCallbacks.forEach((cb) => cb(message));
+      };
+      
+      if (data instanceof Blob) {
+        data.text().then(processData).catch((err) => {
+          console.error('[SyncClient] Failed to read Blob:', err);
+        });
+      } else {
+        processData(data);
       }
-
-      // Track remote clock
-      if (message.vector_clock > this.remoteClock) {
-        this.remoteClock = message.vector_clock;
-      }
-
-      this.messageCallbacks.forEach((cb) => cb(message));
-    } catch (error) {
-      console.error('[SyncClient] Message parse error:', error);
+    } catch (err) {
+      console.error('[SyncClient] Message parse error:', err);
     }
   }
 
@@ -210,6 +269,13 @@ export class SyncClient {
   private handleClose(event: CloseEvent): void {
     console.log('[SyncClient] WebSocket closed:', event.code, event.reason);
     this._isConnected = false;
+    
+    // Clear ping interval
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
+    
     this.ws = null;
 
     const reason = event.reason || `Code ${event.code}`;
@@ -229,6 +295,7 @@ export class SyncClient {
       payload: {
         client_info: this.getClientInfo(),
         device_name: this.settings.deviceName,
+        last_seq: this.lastSequence,
       },
     };
 
@@ -245,19 +312,47 @@ export class SyncClient {
   }
 
   private async replayOfflineOperations(): Promise<void> {
-    if (!this.db) return;
-
-    const ops = await this.getStoredOperations();
-
-    for (const op of ops) {
-      const message: SyncMessage = JSON.parse(op.data);
-      this.incrementClock();
-      this.sendEnvelope({ ...message, vector_clock: this.localClock });
+    if (!this.db) {
+      console.log('[SyncClient] No DB, skipping offline replay');
+      return;
     }
-
-    if (ops.length > 0) {
-      await this.clearStoredOperations();
-    }
+    
+    console.log('[SyncClient] Replaying offline operations...');
+    
+    return new Promise((resolve, reject) => {
+      const tx = this.db!.transaction('operations', 'readwrite');
+      const store = tx.objectStore('operations');
+      const request = store.getAll();
+      
+      request.onsuccess = () => {
+        const ops = request.result;
+        console.log('[SyncClient] Found offline operations:', ops.length);
+        
+        if (ops.length === 0) {
+          resolve();
+          return;
+        }
+        
+        ops.forEach((op: any) => {
+          try {
+            const msg = JSON.parse(op.data);
+            console.log('[SyncClient] Replaying:', msg.type, op.path);
+            this.sendEnvelope(msg);
+          } catch (e) {
+            console.error('[SyncClient] Failed to parse offline op:', e);
+          }
+        });
+        
+        const delTx = this.db!.transaction('operations', 'readwrite');
+        delTx.objectStore('operations').clear();
+        resolve();
+      };
+      
+      request.onerror = () => {
+        console.error('[SyncClient] Failed to get offline ops');
+        resolve();
+      };
+    });
   }
 
   private queueOfflineOperation(message: SyncMessage): void {
@@ -284,39 +379,55 @@ export class SyncClient {
 
   private async getStoredOperations(): Promise<Array<{ id: number; data: string; timestamp: number }>> {
     if (!this.db) return [];
+    
+    try {
+      return new Promise((resolve, reject) => {
+        const tx = this.db!.transaction('operations', 'readonly');
+        const store = tx.objectStore('operations');
+        const index = store.index('timestamp');
+        const request = index.getAll();
 
-    return new Promise((resolve, reject) => {
-      const tx = this.db!.transaction('operations', 'readonly');
-      const store = tx.objectStore('operations');
-      const index = store.index('timestamp');
-      const request = index.getAll();
-
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
-    });
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => resolve([]); // Return empty on error
+      });
+    } catch {
+      return [];
+    }
   }
 
   private async clearStoredOperations(): Promise<void> {
     if (!this.db) return;
 
-    return new Promise((resolve, reject) => {
-      const tx = this.db!.transaction('operations', 'readwrite');
-      const store = tx.objectStore('operations');
-      const request = store.clear();
+    try {
+      return new Promise((resolve, reject) => {
+        const tx = this.db!.transaction('operations', 'readwrite');
+        const store = tx.objectStore('operations');
+        const request = store.clear();
 
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
-    });
+        request.onsuccess = () => resolve();
+        request.onerror = () => resolve(); // Resolve on error
+      });
+    } catch {
+      return;
+    }
   }
 
   private scheduleReconnect(): void {
     this.clearReconnectTimer();
 
+    const maxReconnectAttempts = 10;
     const baseDelay = 1000;
     const maxDelay = 60000;
     const delay = Math.min(baseDelay * Math.pow(2, this.reconnectAttempts), maxDelay);
 
-    console.log(`[SyncClient] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts + 1})`);
+    if (this.reconnectAttempts >= maxReconnectAttempts) {
+      console.error(`[SyncClient] Max reconnect attempts (${maxReconnectAttempts}) reached. Giving up.`);
+      this._isConnected = false;
+      this.disconnectCallbacks.forEach((cb) => cb('max attempts reached'));
+      return;
+    }
+
+    console.log(`[SyncClient] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts + 1}/${maxReconnectAttempts})`);
 
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectAttempts++;

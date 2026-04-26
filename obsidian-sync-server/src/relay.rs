@@ -4,6 +4,7 @@ use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tracing::{error, info};
 
@@ -12,6 +13,8 @@ pub struct RelayState {
     pub clients: RwLock<HashMap<String, Arc<ClientSession>>>,
     pub oplog: Arc<Oplog>,
     pub tx: broadcast::Sender<Vec<u8>>,
+    pub recent_messages: RwLock<HashSet<String>>,
+    pub message_timestamps: RwLock<HashMap<String, Instant>>,
 }
 
 pub struct ClientSession {
@@ -20,6 +23,7 @@ pub struct ClientSession {
     pub subscribed_vaults: RwLock<HashSet<String>>,
     pub vector_clock: RwLock<HashMap<String, u64>>,
     pub ws_sender: broadcast::Sender<Vec<u8>>,
+    pub last_seq: RwLock<i64>,
 }
 
 impl RelayState {
@@ -30,6 +34,8 @@ impl RelayState {
             clients: RwLock::new(HashMap::new()),
             oplog,
             tx,
+            recent_messages: RwLock::new(HashSet::new()),
+            message_timestamps: RwLock::new(HashMap::new()),
         }
     }
 
@@ -50,7 +56,7 @@ impl RelayState {
         }
 
         let (mut sender, mut receiver) = socket.split();
-        let (tx, _rx) = broadcast::channel::<Vec<u8>>(256);
+        let (tx, mut rx) = broadcast::channel::<Vec<u8>>(256);
         let client_id = uuid::Uuid::new_v4().to_string();
         let session = Arc::new(ClientSession {
             client_id: client_id.clone(),
@@ -58,6 +64,7 @@ impl RelayState {
             subscribed_vaults: RwLock::new(HashSet::new()),
             vector_clock: RwLock::new(HashMap::new()),
             ws_sender: tx,
+            last_seq: RwLock::new(0),
         });
 
         {
@@ -65,12 +72,12 @@ impl RelayState {
             clients.insert(client_id.clone(), session.clone());
         }
 
-        let relay_tx = self.tx.subscribe();
-
-        tokio::spawn(async move {
-            let mut rx = relay_tx;
+        // Listen on per-client channel to forward to WebSocket
+tokio::spawn(async move {
             while let Ok(out) = rx.recv().await {
-                if sender.send(tokio_tungstenite::tungstenite::Message::Binary(out)).await.is_err() {
+                // Send as text (convert bytes to string)
+                let text = String::from_utf8_lossy(&out);
+                if sender.send(tokio_tungstenite::tungstenite::Message::Text(text.to_string())).await.is_err() {
                     break;
                 }
             }
@@ -160,10 +167,12 @@ impl RelayState {
             .map_err(|e| RelayError::ParseError(e.to_string()))?;
 
         let msg_type = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        
+        info!(client_id = %session.client_id, msg_type = %msg_type, "received message");
 
         match msg_type {
             "UPDATE" => {
-                // Parse the payload from the message
+                // Parse the payload from the message - both binary update AND plain content
                 let payload = msg.get("payload").and_then(|p| p.as_object()).cloned();
                 
                 let vault_id = payload.as_ref()
@@ -178,32 +187,105 @@ impl RelayState {
                     .unwrap_or("")
                     .to_string();
                 
+                // Get binary update
                 let update: Vec<u8> = payload.as_ref()
                     .and_then(|p| p.get("update"))
                     .and_then(|v| v.as_array())
                     .map(|arr| arr.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect())
                     .unwrap_or_default();
                 
-                info!(client_id = %session.client_id, vault = %vault_id, path = %path, update_size = %update.len(), "received UPDATE");
+                // ALSO get plain text content - simpler!
+                let content = payload.as_ref()
+                    .and_then(|p| p.get("content"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                
+                // If we have plain content, include it in broadcast
+                let mut broadcast_data = update.clone();
+                if !content.is_empty() {
+                    // Send both binary and text
+                    info!(client_id = %session.client_id, vault = %vault_id, path = %path, update_size = %update.len(), content_size = %content.len(), "received UPDATE with content");
+                } else {
+                    info!(client_id = %session.client_id, vault = %vault_id, path = %path, update_size = %update.len(), "received UPDATE");
+                }
                 
                 // Auto-subscribe client to vault
                 if !vault_id.is_empty() {
                     session.subscribed_vaults.write().insert(vault_id.clone());
                 }
                 
-                // Broadcast to other clients
-                let _ = self.broadcast_to_vault(&vault_id, &session.client_id, update).await;
+                // Broadcast BOTH as JSON with content field
+                let msg = serde_json::json!({
+                    "type": "UPDATE",
+                    "client_id": session.client_id,
+                    "vault_key": "",
+                    "vector_clock": 0,
+                    "payload": {
+                        "vault_id": vault_id,
+                        "path": path,
+                        "update": if update.is_empty() { serde_json::Value::Null } else { serde_json::json!(update) },
+                        "content": if content.is_empty() { serde_json::Value::Null } else { serde_json::json!(content) },
+                        "isText": !content.is_empty()
+                    }
+                });
+                
+                let json_bytes = serde_json::to_vec(&msg).map_err(|e| RelayError::SerializeError(e.to_string()))?;
+                
+let _ = self.broadcast_to_vault_json(&vault_id, &session.client_id, json_bytes).await;
             }
             "HANDSHAKE" => {
-                let payload: HandshakeMsg = serde_json::from_value(msg.clone())
-                    .unwrap_or(HandshakeMsg { vault_id: "".to_string(), last_seq: 0 });
+                #[derive(serde::Deserialize)]
+                struct HandshakePayload {
+                    #[serde(default)]
+                    vault_id: String,
+                    #[serde(default)]
+                    last_seq: i64,
+                }
+                let payload: HandshakePayload = serde_json::from_value(msg.get("payload").cloned().unwrap_or(serde_json::Value::Null))
+                    .unwrap_or(HandshakePayload { vault_id: "".to_string(), last_seq: 0 });
                 
-                // Auto-subscribe client to vault
+                *session.last_seq.write() = payload.last_seq;
+                
                 if !payload.vault_id.is_empty() {
                     session.subscribed_vaults.write().insert(payload.vault_id.clone());
                 }
                 
+                info!(client_id = %session.client_id, vault = %payload.vault_id, last_seq = %payload.last_seq, "handshake");
                 self.send_handshake(&payload.vault_id, payload.last_seq, session).await?;
+            }
+            "CREATE" => {
+                #[derive(serde::Deserialize)]
+                struct CreateMsg {
+                    #[serde(default)]
+                    vault_id: String,
+                    path: String,
+                    #[serde(default)]
+                    content: String,
+                }
+                let payload: CreateMsg = serde_json::from_value(msg.clone())
+                    .unwrap_or(CreateMsg { vault_id: "".to_string(), path: "".to_string(), content: "".to_string() });
+                
+                if !payload.vault_id.is_empty() {
+                    session.subscribed_vaults.write().insert(payload.vault_id.clone());
+                }
+                
+                info!(client_id = %session.client_id, vault = %payload.vault_id, path = %payload.path, "create");
+                
+                let msg = serde_json::json!({
+                    "type": "CREATE",
+                    "client_id": session.client_id,
+                    "vault_key": "",
+                    "vector_clock": 0,
+                    "payload": {
+                        "vault_id": payload.vault_id,
+                        "path": payload.path,
+                        "content": payload.content,
+                    }
+                });
+                
+                let json_bytes = serde_json::to_vec(&msg).map_err(|e| RelayError::SerializeError(e.to_string()))?;
+                let _ = self.broadcast_to_vault_json(&payload.vault_id, &session.client_id, json_bytes).await;
             }
             "DELETE" => {
                 let payload: DeleteMsg = serde_json::from_value(msg.clone())
@@ -215,6 +297,20 @@ impl RelayState {
                 }
                 
                 info!(client_id = %session.client_id, vault = %payload.vault_id, path = %payload.path, "delete");
+                
+                let msg = serde_json::json!({
+                    "type": "DELETE",
+                    "client_id": session.client_id,
+                    "vault_key": "",
+                    "vector_clock": 0,
+                    "payload": {
+                        "vault_id": payload.vault_id,
+                        "path": payload.path,
+                    }
+                });
+                
+                let json_bytes = serde_json::to_vec(&msg).map_err(|e| RelayError::SerializeError(e.to_string()))?;
+                let _ = self.broadcast_to_vault_json(&payload.vault_id, &session.client_id, json_bytes).await;
             }
             "RENAME" => {
                 let payload: RenameMsg = serde_json::from_value(msg.clone())
@@ -226,12 +322,31 @@ impl RelayState {
                 }
                 
                 info!(client_id = %session.client_id, vault = %payload.vault_id, old = %payload.old_path, new = %payload.new_path, "rename");
+                
+                let msg = serde_json::json!({
+                    "type": "RENAME",
+                    "client_id": session.client_id,
+                    "vault_key": "",
+                    "vector_clock": 0,
+                    "payload": {
+                        "vault_id": payload.vault_id,
+                        "old_path": payload.old_path,
+                        "new_path": payload.new_path,
+                    }
+                });
+                
+                let json_bytes = serde_json::to_vec(&msg).map_err(|e| RelayError::SerializeError(e.to_string()))?;
+                let _ = self.broadcast_to_vault_json(&payload.vault_id, &session.client_id, json_bytes).await;
             }
             "SUBSCRIBE" => {
                 let payload: SubscribeMsg = serde_json::from_value(msg.clone())
                     .unwrap_or(SubscribeMsg { vault_id: "".to_string() });
                 session.subscribed_vaults.write().insert(payload.vault_id.clone());
                 info!(client_id = %session.client_id, vault = %payload.vault_id, "subscribed");
+            }
+            "PING" => {
+                // Respond to ping to keep connection alive
+                let _ = session.ws_sender.send(b"{\"type\":\"PONG\"}".to_vec());
             }
             _ => {
                 info!(client_id = %session.client_id, msg_type = %msg_type, "unhandled message type");
@@ -261,7 +376,7 @@ impl RelayState {
         Ok(())
     }
 
-    async fn broadcast_to_vault(
+async fn broadcast_to_vault(
         &self,
         vault_id: &str,
         exclude_client: &str,
@@ -270,6 +385,18 @@ impl RelayState {
         if data.is_empty() {
             return Ok(());
         }
+        
+        // Wrap in JSON message format
+        let msg = serde_json::json!({
+            "type": "UPDATE",
+            "payload": {
+                "vault_id": vault_id,
+                "update": data,
+                "isText": false
+            }
+        });
+        
+        let json_bytes = serde_json::to_vec(&msg).map_err(|e| RelayError::SerializeError(e.to_string()))?;
         
         let clients = self.clients.read();
         let client_count = clients.len();
@@ -280,14 +407,64 @@ impl RelayState {
                 // Auto-subscribe client to this vault for future broadcasts
                 if !vault_id.is_empty() {
                     session.subscribed_vaults.write().insert(vault_id.to_string());
-                }
-                let _ = session.ws_sender.send(data.clone());
+}
+                let _ = session.ws_sender.send(json_bytes.clone());
                 info!(client_id = %id, "sent update to client");
             }
         }
         Ok(())
     }
-
+    
+    async fn broadcast_to_vault_json(
+        &self,
+        vault_id: &str,
+        exclude_client: &str,
+        data: Vec<u8>,
+    ) -> Result<(), RelayError> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        
+        // Message deduplication: compute hash of message content
+        let msg_hash = format!("{}:{}", vault_id, sha256_hash(&data));
+        
+        // Clean old entries (older than 5 seconds)
+        let now = Instant::now();
+        {
+            let mut timestamps = self.message_timestamps.write();
+            timestamps.retain(|_, instant| now.duration_since(*instant) < Duration::from_secs(5));
+        }
+        
+        // Check for duplicate
+        {
+            let mut recent = self.recent_messages.write();
+            let mut timestamps = self.message_timestamps.write();
+            if recent.contains(&msg_hash) {
+                info!(vault = %vault_id, "skipping duplicate message");
+                return Ok(());
+            }
+            recent.insert(msg_hash.clone());
+            timestamps.insert(msg_hash, now);
+        }
+        
+        let clients = self.clients.read();
+        let mut sent_count = 0;
+        
+        // Always broadcast to all connected clients (no subscription check)
+        for (id, session) in clients.iter() {
+            if id == exclude_client {
+                continue;
+            }
+            // Always send to everyone
+            let _ = session.ws_sender.send(data.clone());
+            sent_count += 1;
+            info!(client_id = %id, "sent update to client");
+        }
+        
+        info!(vault = %vault_id, exclude = %exclude_client, data_size = %data.len(), client_count = %sent_count, "broadcasting JSON to all");
+        Ok(())
+    }
+    
     async fn send_handshake(
         &self,
         vault_id: &str,
@@ -376,4 +553,12 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, RelayError> {
     base64::engine::general_purpose::STANDARD
         .decode(input)
         .map_err(|e| RelayError::ParseError(e.to_string()))
+}
+
+fn sha256_hash(data: &[u8]) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    data.hash(&mut hasher);
+    format!("{:x}", hasher.finish())
 }

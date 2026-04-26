@@ -1,5 +1,5 @@
 import * as Y from 'yjs';
-import type { Vault, TFile } from 'obsidian';
+import { Vault, TFile } from 'obsidian';
 
 export interface CRDTManagerConfig {
   vault: Vault;
@@ -108,6 +108,12 @@ export class CRDTManager {
     return doc.getText('content').toString();
   }
 
+  getDocumentString(path: string): string | null {
+    const binding = this.docs.get(path);
+    if (!binding) return null;
+    return this.getDocumentContent(binding.doc);
+  }
+
   updateDocument(path: string, content: string): void {
     let binding = this.docs.get(path);
     if (!binding) {
@@ -156,10 +162,6 @@ export class CRDTManager {
     if (!binding) return;
 
     Y.applyUpdate(binding.doc, update, 'remote');
-    
-    // Notify about remote update for sync back
-    const content = this.getDocumentContent(binding.doc);
-    this.onRemoteUpdate(path, content);
     
     if (!binding.isOpen) {
       this.flushToDisk(path).catch((err) =>
@@ -254,7 +256,7 @@ export class CRDTManager {
 export function createCRDTManager(
   vault: Vault,
   onSendUpdate: (path: string, update: Uint8Array) => void,
-  onRemoteUpdate: (path: string, update: Uint8Array) => void,
+  onRemoteUpdate: (path: string, content: string) => void,
   gcInterval?: number
 ): CRDTManager {
   return new CRDTManager({ vault, onSendUpdate, onRemoteUpdate, gcInterval });

@@ -194,9 +194,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let vault_key =
         std::env::var("VAULT_KEY").unwrap_or_else(|_| config.vault_key.clone());
     if vault_key.is_empty() {
-        warn!("WARNING: vault_key is empty — accepting all connections!");
+        warn!("WARNING: vault_key is empty — rejecting all connections!");
+        configure_auth(String::new()); // Empty = always reject
+    } else {
+        configure_auth(vault_key.clone());
     }
-    configure_auth(vault_key.clone());
 
     let state = AppState::new(&config).await?;
 

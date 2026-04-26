@@ -67,13 +67,13 @@ export class SyncSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName('Max Binary Size (MB)')
       .setDesc('Skip syncing binary files larger than this on mobile')
-      .addNumber((number) =>
-        number
-          .setValue(Math.round(settings.maxBinarySize / (1024 * 1024)))
-          .setMin(1)
-          .setMax(100)
+      .addText((text) =>
+        text
+          .setPlaceholder('20')
+          .setValue(String(Math.round(settings.maxBinarySize / (1024 * 1024))))
           .onChange(async (value) => {
-            (this.plugin as any).settings.maxBinarySize = value * 1024 * 1024;
+            const num = parseInt(value) || 20;
+            (this.plugin as any).settings.maxBinarySize = num * 1024 * 1024;
             await (this.plugin as any).saveSettings();
           })
       );
@@ -99,13 +99,13 @@ export class SyncSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName('CRDT GC Interval (hours)')
       .setDesc('How often to compact CRDT history (default: 24)')
-      .addNumber((number) =>
-        number
-          .setValue(Math.round(settings.crdtGcInterval / (1000 * 60 * 60)))
-          .setMin(1)
-          .setMax(168)
+      .addText((text) =>
+        text
+          .setPlaceholder('24')
+          .setValue(String(Math.round(settings.crdtGcInterval / (1000 * 60 * 60))))
           .onChange(async (value) => {
-            (this.plugin as any).settings.crdtGcInterval = value * 60 * 60 * 1000;
+            const num = parseInt(value) || 24;
+            (this.plugin as any).settings.crdtGcInterval = num * 60 * 60 * 1000;
             await (this.plugin as any).saveSettings();
           })
       );
@@ -125,7 +125,7 @@ export class SyncSettingTab extends PluginSettingTab {
     });
 
     // Poll status every 2s
-    const interval = setInterval(() => {
+    setInterval(() => {
       const connected = (this.plugin as any)?.ws?.isConnected?.();
       statusSpan.textContent = connected ? 'Connected' : 'Disconnected';
       statusSpan.setAttr(
@@ -133,7 +133,5 @@ export class SyncSettingTab extends PluginSettingTab {
         `color: ${connected ? 'var(--color-green)' : 'var(--color-orange)'}`
       );
     }, 2000);
-
-    this.register(() => clearInterval(interval));
   }
 }

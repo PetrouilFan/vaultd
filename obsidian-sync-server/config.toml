@@ -1,5 +1,6 @@
 server_id = "vaultd-1"
 listen_addr = "0.0.0.0:8080"
+vault_key = "dd90a3b00ad5598d80c7830673faf667acfdc93553f3987b267280dc747f708a"
 
 [database]
 path = "./data/sync.db"

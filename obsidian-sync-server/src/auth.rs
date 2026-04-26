@@ -12,6 +12,12 @@ pub fn configure(key: String) {
 pub fn validate_vault_key(key: &str) -> Result<(), AuthError> {
     let guard = VAULT_KEY.read();
     let expected = guard.as_ref().ok_or(AuthError::NotConfigured)?;
+    
+    // Empty vault key = reject all
+    if expected.is_empty() {
+        return Err(AuthError::InvalidKey);
+    }
+    
     if expected == key {
         Ok(())
     } else {

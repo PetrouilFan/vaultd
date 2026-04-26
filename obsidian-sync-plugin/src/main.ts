@@ -25,6 +25,9 @@ export default class SyncPlugin extends Plugin {
   private activeFilePath: string | null = null;
   private isSyncingRef!: () => boolean;
   private setSyncing!: (v: boolean) => void;
+  private debounceTimers: Map<string, NodeJS.Timeout> = new Map();
+  private pendingChanges: Set<string> = new Set();
+  private readonly DEBOUNCE_MS = 300;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -97,11 +100,13 @@ export default class SyncPlugin extends Plugin {
     });
 
     try {
+      console.log('[Vaultd] Attempting to connect to:', this.settings.serverUrl);
       await this.ws.connect();
+      console.log('[Vaultd] Connected successfully!');
       new Notice('Tailnet Sync connected');
       this.processOfflineQueue();
     } catch (e) {
-      console.error('Failed to connect to sync server:', e);
+      console.error('[Vaultd] Failed to connect to sync server:', e);
       new Notice('Failed to connect to sync server');
     }
   }
@@ -120,6 +125,12 @@ export default class SyncPlugin extends Plugin {
       this.app.vault.on('rename', (file, oldPath) => this.onLocalRename(oldPath, file.path))
     );
     this.registerEvent(
+      this.app.vault.on('folder-rename', (folder, oldPath) => this.onLocalFolderRename(oldPath, folder.path))
+    );
+    this.registerEvent(
+      this.app.vault.on('folder-delete', (folder) => this.onLocalFolderDelete(folder.path))
+    );
+    this.registerEvent(
       this.app.workspace.on('active-leaf-change', (leaf) => this.onActiveLeafChange(leaf))
     );
   }
@@ -128,7 +139,28 @@ export default class SyncPlugin extends Plugin {
     if (file instanceof TFolder) return;
     if (matchesPattern(file.path, this.settings.excludePatterns)) return;
     if (this.isSyncing) return;
-
+    
+    this.pendingChanges.add(file.path);
+    
+    const existingTimer = this.debounceTimers.get(file.path);
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+    }
+    
+    const timer = setTimeout(() => {
+      this.debounceTimers.delete(file.path);
+      if (this.pendingChanges.has(file.path)) {
+        this.pendingChanges.delete(file.path);
+        this.processLocalChange(file);
+      }
+    }, this.DEBOUNCE_MS);
+    
+    this.debounceTimers.set(file.path, timer);
+  }
+  
+  private processLocalChange(file: TFile | TFolder): void {
+    if (file instanceof TFolder) return;
+    
     const classification = fileClass(file.path);
     if (classification === 'text') {
       this.handleTextFileChange(file);
@@ -140,10 +172,15 @@ export default class SyncPlugin extends Plugin {
   private async handleTextFileChange(file: TFile): Promise<void> {
     try {
       const content = await this.app.vault.read(file);
-      // Update the local CRDT doc with the new content
+      const isNewFile = !this.crdtManager.hasDocument(file.path);
+      
       this.crdtManager.updateDocument(file.path, content);
-      // Send the CRDT update to other clients
-      this.onCrdtUpdate(file.path, new Uint8Array()); // triggers send in crdt manager
+      
+      if (isNewFile) {
+        this.sendMessage('CREATE', { vault_id: this.getVaultId(), path: file.path, content });
+      } else {
+        this.onCrdtUpdate(file.path, new Uint8Array());
+      }
     } catch (e) {
       console.error('Failed to handle text file change:', e);
     }
@@ -181,6 +218,22 @@ export default class SyncPlugin extends Plugin {
     this.crdtManager.renameDocument(oldPath, newPath);
   }
 
+  private onLocalFolderRename(oldPath: string, newPath: string): void {
+    if (matchesPattern(newPath, this.settings.excludePatterns)) return;
+    if (this.isSyncing) return;
+
+    console.log('[SyncPlugin] Folder renamed:', oldPath, '->', newPath);
+    this.sendMessage('RENAME', { vault_id: this.getVaultId(), old_path: oldPath, new_path: newPath });
+  }
+
+  private onLocalFolderDelete(path: string): void {
+    if (matchesPattern(path, this.settings.excludePatterns)) return;
+    if (this.isSyncing) return;
+
+    console.log('[SyncPlugin] Folder deleted:', path);
+    this.sendMessage('DELETE', { vault_id: this.getVaultId(), path });
+  }
+
   private onActiveLeafChange(leaf: any): void {
     const newPath = leaf?.view?.file?.path;
     if (!newPath) return;
@@ -197,30 +250,41 @@ export default class SyncPlugin extends Plugin {
     const binding = this.crdtManager.getDocument(path);
     if (!binding) return;
     
-    // Encode the entire doc state as update and send
-    const updateBytes = Y.encodeStateAsUpdate(binding);
+    const stateVector = Y.encodeStateVector(binding);
+    const updateBytes = Y.encodeStateAsUpdate(binding, stateVector);
     if (updateBytes.length > 0) {
       this.sendMessage('UPDATE', { 
         vault_id: this.getVaultId(),
         path, 
         update: Array.from(updateBytes),
+        state_vector: Array.from(stateVector),
         isText: true
       });
     }
   }
 
   private onRemoteCrdtUpdate(path: string, content: string): void {
-    // CRDT manager already applied the content, now request sync back
-    this.syncRemoteContent(path);
+    if (this.isSyncing) return;
+    this.isSyncing = true;
+    try {
+      this.syncRemoteContent(path);
+    } finally {
+      this.isSyncing = false;
+    }
   }
 
   private handleIncomingMessage(message: SyncMessage): void {
+    console.log('[Vaultd] handleIncomingMessage:', message.type, 'from:', message.client_id);
+    
     // Ignore own messages
     if (message.client_id === this.clientId) return;
 
     switch (message.type) {
       case 'UPDATE':
         this.handleRemoteUpdate(message);
+        break;
+      case 'CREATE':
+        this.handleRemoteCreate(message);
         break;
       case 'RENAME':
         this.handleRemoteRename(message);
@@ -240,35 +304,53 @@ export default class SyncPlugin extends Plugin {
     }
   }
 
-  private handleRemoteUpdate(message: SyncMessage): void {
+private async handleRemoteUpdate(message: SyncMessage): Promise<void> {
+    console.log('[Vaultd] handleRemoteUpdate called!');
     const payload = message.payload as any;
     const path = payload.path as string;
+    console.log('[Vaultd] Remote update for:', path);
 
     if (this.isSyncing) return;
+    
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (file instanceof TFolder) {
+      console.log('[Vaultd] Ignoring folder update:', path);
+      return;
+    }
+    
+    if (!file && !payload.isCreate) {
+      console.log('[Vaultd] File does not exist and not a create - skipping:', path);
+      return;
+    }
+    
     this.isSyncing = true;
 
     try {
-      if (payload.isBinary) {
-        this.binarySync.downloadBinary(payload.hash as string, path);
-      } else if (payload.update && Array.isArray(payload.update)) {
-        // Yjs binary update
+      if (payload.update && Array.isArray(payload.update)) {
+        console.log('[Vaultd] CRDT update, size:', payload.update.length);
         const updateBytes = new Uint8Array(payload.update);
         if (this.crdtManager.hasDocument(path)) {
           this.crdtManager.applyRemoteUpdate(path, updateBytes);
         } else {
-          // Create new doc from update
           const doc = new Y.Doc();
           Y.applyUpdate(doc, updateBytes, 'remote');
           const content = doc.getText('content').toString();
           this.crdtManager.updateDocument(path, content);
         }
+        const content = this.crdtManager.getDocumentString(path);
+        if (content !== null) {
+          await this.writeRemoteContent(path, content);
+        }
       } else if (payload.content !== undefined) {
+        console.log('[Vaultd] Plain text update:', payload.content.substring(0, 50));
         // Plain text content
         const remoteContent = payload.content as string;
         if (this.crdtManager.hasDocument(path)) {
           this.crdtManager.applyRemoteContent(path, remoteContent);
         }
         this.writeRemoteContent(path, remoteContent);
+      } else {
+        console.log('[Vaultd] No update data found!');
       }
     } finally {
       this.isSyncing = false;
@@ -276,13 +358,22 @@ export default class SyncPlugin extends Plugin {
   }
 
   private async writeRemoteContent(path: string, content: string): Promise<void> {
+    this.isSyncing = true;
     try {
-      const file = this.app.vault.getAbstractFileByPath(path);
+      let file = this.app.vault.getAbstractFileByPath(path);
       if (file instanceof TFile) {
         await this.app.vault.modify(file, content);
+      } else {
+        // File doesn't exist - create it
+        console.log('[Vaultd] Creating new file:', path);
+        await this.app.vault.create(path, content);
+        console.log('[Vaultd] Created file:', path);
       }
     } catch (e) {
-      console.error('Failed to write remote content:', e);
+      console.error('[Vaultd] Failed to write remote content:', e);
+      new Notice('Failed to sync: ' + path);
+    } finally {
+      this.isSyncing = false;
     }
   }
 
@@ -298,6 +389,31 @@ export default class SyncPlugin extends Plugin {
     }
   }
 
+  private async handleRemoteCreate(message: SyncMessage): Promise<void> {
+    const payload = message.payload as any;
+    const path = payload.path as string;
+    const content = payload.content as string || '';
+
+    if (this.isSyncing) return;
+    this.isSyncing = true;
+
+    try {
+      const existingFile = this.app.vault.getAbstractFileByPath(path);
+      if (existingFile instanceof TFile) {
+        console.log('[Vaultd] File already exists, updating:', path);
+        await this.app.vault.modify(existingFile, content);
+      } else {
+        console.log('[Vaultd] Creating new file:', path);
+        await this.app.vault.create(path, content);
+        this.crdtManager.updateDocument(path, content);
+      }
+    } catch (e) {
+      console.error('[Vaultd] Failed to handle remote create:', e);
+    } finally {
+      this.isSyncing = false;
+    }
+  }
+
   private handleRemoteRename(message: SyncMessage): void {
     const payload = message.payload as any;
     const oldPath = payload.old_path as string;
@@ -309,9 +425,13 @@ export default class SyncPlugin extends Plugin {
     try {
       const file = this.app.vault.getAbstractFileByPath(oldPath);
       if (file instanceof TFile) {
-        this.app.vault.rename(file, newPath); // Obsidian updates wikilinks automatically
+        this.app.vault.rename(file, newPath);
+      } else {
+        console.log('[Vaultd] File not found for rename, may have been deleted:', oldPath);
       }
-      this.crdtManager.renameDocument(oldPath, newPath);
+      if (this.crdtManager.hasDocument(oldPath)) {
+        this.crdtManager.renameDocument(oldPath, newPath);
+      }
     } catch (e) {
       console.error('Failed to handle remote rename:', e);
     } finally {
@@ -330,6 +450,8 @@ export default class SyncPlugin extends Plugin {
       const file = this.app.vault.getAbstractFileByPath(path);
       if (file) {
         this.app.vault.delete(file);
+      } else {
+        console.log('[Vaultd] File already deleted, skipping:', path);
       }
       this.crdtManager.destroyDocumentBinding(path);
     } catch (e) {
