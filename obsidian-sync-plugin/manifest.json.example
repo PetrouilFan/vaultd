@@ -1,0 +1,25 @@
+{
+  "id": "vaultd",
+  "name": "Vaultd",
+  "version": "1.0.0",
+  "minAppVersion": "1.4.0",
+  "description": "Real-time bidirectional sync for Obsidian vaults using CRDT",
+  "author": "Vaultd",
+  "isDesktopOnly": false,
+  "authorUrl": "",
+  "fundingUrl": "",
+  "enable": true,
+  "server": {
+    "wsUrl": "ws://YOUR_SERVER_IP:8081",
+    "httpUrl": "http://YOUR_SERVER_IP:8080"
+  },
+  "sync": {
+    "enabled": true,
+    "crdtGcInterval": 30000,
+    "maxFileSize": 10485760
+  },
+  "binary": {
+    "enabled": false,
+    "hashAlgorithm": "xxhash"
+  }
+}

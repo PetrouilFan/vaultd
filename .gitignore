@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Build output
+*.js
+dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+
+# obsidian-sync-server
+target/
+*.db
+*.db-journal

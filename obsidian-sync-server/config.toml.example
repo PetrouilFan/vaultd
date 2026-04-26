@@ -1,0 +1,25 @@
+# Vaultd - Obsidian Sync Server Configuration
+# Copy this file to config.toml and customize
+
+[data_dir]
+# Directory to store sync data (wal, blobs, etc.)
+path = "./data"
+
+[server]
+# HTTP port for API (upload/download)
+http_port = 8080
+
+# WebSocket port for real-time sync
+ws_port = 8081
+
+# Server ID (used in multi-server setups)
+server_id = "server-1"
+
+[auth]
+# Vault key (shared secret)
+# Generate with: openssl rand -hex 32
+vault_key = "REPLACE_WITH_YOUR_VAULT_KEY"
+
+[logging]
+# Log level: trace, debug, info, warn, error
+level = "info"
