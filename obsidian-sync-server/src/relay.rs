@@ -163,16 +163,36 @@ impl RelayState {
 
         match msg_type {
             "UPDATE" => {
-                let payload: UpdateMsg = serde_json::from_value(msg.clone())
-                    .unwrap_or(UpdateMsg { vault_id: "".to_string(), path: "".to_string(), update: vec![], content: "".to_string(), isText: false });
+                // Parse the payload from the message
+                let payload = msg.get("payload").and_then(|p| p.as_object()).cloned();
+                
+                let vault_id = payload.as_ref()
+                    .and_then(|p| p.get("vault_id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                
+                let path = payload.as_ref()
+                    .and_then(|p| p.get("path"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                
+                let update: Vec<u8> = payload.as_ref()
+                    .and_then(|p| p.get("update"))
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect())
+                    .unwrap_or_default();
+                
+                info!(client_id = %session.client_id, vault = %vault_id, path = %path, update_size = %update.len(), "received UPDATE");
                 
                 // Auto-subscribe client to vault
-                if !payload.vault_id.is_empty() {
-                    session.subscribed_vaults.write().insert(payload.vault_id.clone());
+                if !vault_id.is_empty() {
+                    session.subscribed_vaults.write().insert(vault_id.clone());
                 }
                 
                 // Broadcast to other clients
-                let _ = self.broadcast_to_vault(&payload.vault_id, &session.client_id, payload.update).await;
+                let _ = self.broadcast_to_vault(&vault_id, &session.client_id, update).await;
             }
             "HANDSHAKE" => {
                 let payload: HandshakeMsg = serde_json::from_value(msg.clone())
@@ -252,6 +272,9 @@ impl RelayState {
         }
         
         let clients = self.clients.read();
+        let client_count = clients.len();
+        info!( vault = %vault_id, exclude = %exclude_client, data_size = %data.len(), client_count = %client_count, "broadcasting");
+        
         for (id, session) in clients.iter() {
             if id != exclude_client {
                 // Auto-subscribe client to this vault for future broadcasts
@@ -259,6 +282,7 @@ impl RelayState {
                     session.subscribed_vaults.write().insert(vault_id.to_string());
                 }
                 let _ = session.ws_sender.send(data.clone());
+                info!(client_id = %id, "sent update to client");
             }
         }
         Ok(())
