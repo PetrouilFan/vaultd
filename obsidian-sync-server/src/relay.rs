@@ -138,17 +138,14 @@ impl RelayState {
                 session.subscribed_vaults.write().remove(&vault_id);
                 info!(client_id = %session.client_id, vault = %vault_id, "unsubscribed");
             }
-            Ok(Msg::Update { vault_id: _, path, update }) => {
-                // Decode update just to validate, then persist to WAL (stateless relay)
-                // In production you'd broadcast to other clients here
-                
+            Ok(Msg::Update { vault_id, path, update }) => {
                 // Persist to WAL
                 if let Err(e) = self.apply_update_to_doc(&path, session.client_id.clone()).await {
                     error!(err = %e, path = %path, "failed to persist update");
                 }
                 
-                // Broadcast to other clients (placeholder - implement with encoded data)
-                let _ = self.broadcast_to_vault(&"", &session.client_id, update).await;
+                // Broadcast to other clients
+                let _ = self.broadcast_to_vault(&vault_id, &session.client_id, update).await;
             }
             Ok(Msg::Handshake { vault_id, last_seq }) => {
                 self.send_handshake(&vault_id, last_seq, session).await?;
@@ -181,11 +178,16 @@ impl RelayState {
 
     async fn broadcast_to_vault(
         &self,
-        _vault_id: &str,
-        _exclude_client: &str,
-        _data: Vec<u8>,
+        vault_id: &str,
+        exclude_client: &str,
+        data: Vec<u8>,
     ) -> Result<(), RelayError> {
-        // TODO: implement broadcast
+        let clients = self.clients.read();
+        for (id, session) in clients.iter() {
+            if id != exclude_client && session.subscribed_vaults.read().contains(vault_id) {
+                let _ = session.ws_sender.send(data.clone());
+            }
+        }
         Ok(())
     }
 

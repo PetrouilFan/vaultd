@@ -1,0 +1,174 @@
+/* Tailnet Sync - Settings Tab Styles */
+
+.sync-settings-container {
+  padding: 16px;
+}
+
+.sync-settings-container h2 {
+  font-size: 1.2rem;
+  font-weight: 600;
+  margin-bottom: 20px;
+  color: var(--text-normal);
+}
+
+.sync-settings-container .setting-item {
+  margin-bottom: 16px;
+}
+
+.sync-settings-container .setting-item-name {
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--text-normal);
+}
+
+.sync-settings-container .setting-item-desc {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.sync-status {
+  margin-top: 20px;
+  padding: 12px;
+  background: var(--background-secondary);
+  border-radius: 4px;
+}
+
+.sync-status-indicator {
+  display: inline-block;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  background: var(--text-muted);
+  color: var(--background-primary);
+}
+
+.sync-status-indicator.connected {
+  background: var(--color-success);
+  color: white;
+}
+
+.sync-status-indicator.connecting {
+  background: var(--color-warning);
+  color: white;
+}
+
+.sync-status-indicator.error {
+  background: var(--color-error);
+  color: white;
+}
+
+/* Tailnet Sync - Conflict Modal Diff View */
+
+.conflict-modal {
+  max-width: 800px;
+  margin: 0 auto;
+}
+
+.conflict-modal h3 {
+  margin-bottom: 16px;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.conflict-diff-container {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.conflict-diff-pane {
+  flex: 1;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.conflict-diff-pane-header {
+  padding: 8px 12px;
+  background: var(--background-secondary);
+  font-size: 0.85rem;
+  font-weight: 500;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.conflict-diff-content {
+  padding: 12px;
+  font-family: var(--font-family-monospace);
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 300px;
+  overflow-y: auto;
+  background: var(--background-primary);
+}
+
+.diff-line {
+  display: block;
+  padding: 2px 0;
+}
+
+.diff-line.added {
+  background: rgba(46, 160, 67, 0.15);
+  color: var(--color-success);
+}
+
+.diff-line.removed {
+  background: rgba(248, 81, 73, 0.15);
+  color: var(--color-error);
+}
+
+.diff-line.unchanged {
+  color: var(--text-normal);
+}
+
+.conflict-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-color);
+}
+
+.conflict-actions button {
+  padding: 8px 16px;
+  border-radius: 4px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  border: 1px solid var(--border-color);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  transition: background 0.2s ease;
+}
+
+.conflict-actions button:hover {
+  background: var(--background-secondary);
+}
+
+.conflict-actions button.primary {
+  background: var(--accent-color);
+  color: white;
+  border-color: var(--accent-color);
+}
+
+.conflict-actions button.primary:hover {
+  opacity: 0.9;
+}
+
+/* Scrollbar styling for diff view */
+.conflict-diff-content::-webkit-scrollbar {
+  width: 8px;
+}
+
+.conflict-diff-content::-webkit-scrollbar-track {
+  background: var(--background-secondary);
+}
+
+.conflict-diff-content::-webkit-scrollbar-thumb {
+  background: var(--text-muted);
+  border-radius: 4px;
+}
+
+.conflict-diff-content::-webkit-scrollbar-thumb:hover {
+  background: var(--text-normal);
+}

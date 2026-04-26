@@ -197,6 +197,7 @@ export default class SyncPlugin extends Plugin {
     const updateBytes = Y.encodeStateAsUpdate(binding);
     if (updateBytes.length > 0) {
       this.sendMessage('UPDATE', { 
+        vault_id: this.settings.vaultKey.substring(0, 8),
         path, 
         update: Array.from(updateBytes),
         isText: true
@@ -287,7 +288,7 @@ export default class SyncPlugin extends Plugin {
 
     try {
       const content = await this.app.vault.read(file);
-      this.sendMessage('UPDATE', { path, content });
+      this.sendMessage('UPDATE', { vault_id: this.settings.vaultKey.substring(0, 8), path, content });
     } catch (e) {
       console.error('Failed to get local content for sync:', e);
     }

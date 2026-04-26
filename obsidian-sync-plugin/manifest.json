@@ -1,0 +1,11 @@
+{
+  "id": "vaultd",
+  "name": "Vaultd",
+  "version": "1.0.0",
+  "minAppVersion": "1.4.0",
+  "description": "Real-time bidirectional sync for Obsidian vaults using CRDT",
+  "author": "Vaultd",
+  "isDesktopOnly": false,
+  "authorUrl": "",
+  "fundingUrl": ""
+}
