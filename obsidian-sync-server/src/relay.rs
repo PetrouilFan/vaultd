@@ -166,22 +166,45 @@ impl RelayState {
                 let payload: UpdateMsg = serde_json::from_value(msg.clone())
                     .unwrap_or(UpdateMsg { vault_id: "".to_string(), path: "".to_string(), update: vec![], content: "".to_string(), isText: false });
                 
+                // Auto-subscribe client to vault
+                if !payload.vault_id.is_empty() {
+                    session.subscribed_vaults.write().insert(payload.vault_id.clone());
+                }
+                
                 // Broadcast to other clients
                 let _ = self.broadcast_to_vault(&payload.vault_id, &session.client_id, payload.update).await;
             }
             "HANDSHAKE" => {
                 let payload: HandshakeMsg = serde_json::from_value(msg.clone())
                     .unwrap_or(HandshakeMsg { vault_id: "".to_string(), last_seq: 0 });
+                
+                // Auto-subscribe client to vault
+                if !payload.vault_id.is_empty() {
+                    session.subscribed_vaults.write().insert(payload.vault_id.clone());
+                }
+                
                 self.send_handshake(&payload.vault_id, payload.last_seq, session).await?;
             }
             "DELETE" => {
                 let payload: DeleteMsg = serde_json::from_value(msg.clone())
                     .unwrap_or(DeleteMsg { vault_id: "".to_string(), path: "".to_string() });
+                
+                // Auto-subscribe client to vault
+                if !payload.vault_id.is_empty() {
+                    session.subscribed_vaults.write().insert(payload.vault_id.clone());
+                }
+                
                 info!(client_id = %session.client_id, vault = %payload.vault_id, path = %payload.path, "delete");
             }
             "RENAME" => {
                 let payload: RenameMsg = serde_json::from_value(msg.clone())
                     .unwrap_or(RenameMsg { vault_id: "".to_string(), old_path: "".to_string(), new_path: "".to_string() });
+                
+                // Auto-subscribe client to vault
+                if !payload.vault_id.is_empty() {
+                    session.subscribed_vaults.write().insert(payload.vault_id.clone());
+                }
+                
                 info!(client_id = %session.client_id, vault = %payload.vault_id, old = %payload.old_path, new = %payload.new_path, "rename");
             }
             "SUBSCRIBE" => {
@@ -224,9 +247,17 @@ impl RelayState {
         exclude_client: &str,
         data: Vec<u8>,
     ) -> Result<(), RelayError> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        
         let clients = self.clients.read();
         for (id, session) in clients.iter() {
-            if id != exclude_client && session.subscribed_vaults.read().contains(vault_id) {
+            if id != exclude_client {
+                // Auto-subscribe client to this vault for future broadcasts
+                if !vault_id.is_empty() {
+                    session.subscribed_vaults.write().insert(vault_id.to_string());
+                }
                 let _ = session.ws_sender.send(data.clone());
             }
         }
