@@ -115,44 +115,86 @@ impl RelayState {
 
     async fn handle_text_msg(&self, text: &str, session: &Arc<ClientSession>) -> Result<(), RelayError> {
         #[derive(serde::Deserialize)]
-        #[serde(tag = "type")]
-        enum Msg {
-            #[serde(rename = "SUBSCRIBE")]
-            Subscribe { vault_id: String },
-            #[serde(rename = "UNSUBSCRIBE")]
-            Unsubscribe { vault_id: String },
-            #[serde(rename = "UPDATE")]
-            Update { vault_id: String, path: String, update: Vec<u8> },
-            #[serde(rename = "HANDSHAKE")]
-            Handshake { vault_id: String, last_seq: i64 },
-            #[serde(rename = "AWARENESS")]
-            Awareness { vault_id: String, data: Vec<u8> },
+        struct UpdateMsg {
+            #[serde(default)]
+            vault_id: String,
+            path: String,
+            #[serde(default)]
+            update: Vec<u8>,
+            #[serde(default)]
+            content: String,
+            #[serde(default)]
+            isText: bool,
         }
 
-        match serde_json::from_str::<Msg>(text) {
-            Ok(Msg::Subscribe { vault_id }) => {
-                session.subscribed_vaults.write().insert(vault_id.clone());
-                info!(client_id = %session.client_id, vault = %vault_id, "subscribed");
-            }
-            Ok(Msg::Unsubscribe { vault_id }) => {
-                session.subscribed_vaults.write().remove(&vault_id);
-                info!(client_id = %session.client_id, vault = %vault_id, "unsubscribed");
-            }
-            Ok(Msg::Update { vault_id, path, update }) => {
-                // Persist to WAL
-                if let Err(e) = self.apply_update_to_doc(&path, session.client_id.clone()).await {
-                    error!(err = %e, path = %path, "failed to persist update");
-                }
+        #[derive(serde::Deserialize)]
+        struct HandshakeMsg {
+            #[serde(default)]
+            vault_id: String,
+            #[serde(default)]
+            last_seq: i64,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct DeleteMsg {
+            #[serde(default)]
+            vault_id: String,
+            path: String,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct RenameMsg {
+            #[serde(default)]
+            vault_id: String,
+            old_path: String,
+            new_path: String,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct SubscribeMsg {
+            #[serde(default)]
+            vault_id: String,
+        }
+
+        let msg: serde_json::Value = serde_json::from_str(text)
+            .map_err(|e| RelayError::ParseError(e.to_string()))?;
+
+        let msg_type = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+        match msg_type {
+            "UPDATE" => {
+                let payload: UpdateMsg = serde_json::from_value(msg.clone())
+                    .unwrap_or(UpdateMsg { vault_id: "".to_string(), path: "".to_string(), update: vec![], content: "".to_string(), isText: false });
                 
                 // Broadcast to other clients
-                let _ = self.broadcast_to_vault(&vault_id, &session.client_id, update).await;
+                let _ = self.broadcast_to_vault(&payload.vault_id, &session.client_id, payload.update).await;
             }
-            Ok(Msg::Handshake { vault_id, last_seq }) => {
-                self.send_handshake(&vault_id, last_seq, session).await?;
+            "HANDSHAKE" => {
+                let payload: HandshakeMsg = serde_json::from_value(msg.clone())
+                    .unwrap_or(HandshakeMsg { vault_id: "".to_string(), last_seq: 0 });
+                self.send_handshake(&payload.vault_id, payload.last_seq, session).await?;
             }
-            Ok(Msg::Awareness { .. }) => {}
-            Err(e) => return Err(RelayError::ParseError(e.to_string())),
+            "DELETE" => {
+                let payload: DeleteMsg = serde_json::from_value(msg.clone())
+                    .unwrap_or(DeleteMsg { vault_id: "".to_string(), path: "".to_string() });
+                info!(client_id = %session.client_id, vault = %payload.vault_id, path = %payload.path, "delete");
+            }
+            "RENAME" => {
+                let payload: RenameMsg = serde_json::from_value(msg.clone())
+                    .unwrap_or(RenameMsg { vault_id: "".to_string(), old_path: "".to_string(), new_path: "".to_string() });
+                info!(client_id = %session.client_id, vault = %payload.vault_id, old = %payload.old_path, new = %payload.new_path, "rename");
+            }
+            "SUBSCRIBE" => {
+                let payload: SubscribeMsg = serde_json::from_value(msg.clone())
+                    .unwrap_or(SubscribeMsg { vault_id: "".to_string() });
+                session.subscribed_vaults.write().insert(payload.vault_id.clone());
+                info!(client_id = %session.client_id, vault = %payload.vault_id, "subscribed");
+            }
+            _ => {
+                info!(client_id = %session.client_id, msg_type = %msg_type, "unhandled message type");
+            }
         }
+
         Ok(())
     }
 

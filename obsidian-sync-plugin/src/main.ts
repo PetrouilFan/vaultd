@@ -161,19 +161,23 @@ export default class SyncPlugin extends Plugin {
     }
   }
 
+  private getVaultId(): string {
+    return (this.settings.vaultKey || 'default').substring(0, 8);
+  }
+
   private onLocalDelete(file: TFile | TFolder): void {
     if (file instanceof TFolder) return;
     if (matchesPattern(file.path, this.settings.excludePatterns)) return;
     if (this.isSyncing) return;
 
-    this.sendMessage('DELETE', { path: file.path });
+    this.sendMessage('DELETE', { vault_id: this.getVaultId(), path: file.path });
   }
 
   private onLocalRename(oldPath: string, newPath: string): void {
     if (matchesPattern(newPath, this.settings.excludePatterns)) return;
     if (this.isSyncing) return;
 
-    this.sendMessage('RENAME', { old_path: oldPath, new_path: newPath });
+    this.sendMessage('RENAME', { vault_id: this.getVaultId(), old_path: oldPath, new_path: newPath });
     this.crdtManager.renameDocument(oldPath, newPath);
   }
 
@@ -197,7 +201,7 @@ export default class SyncPlugin extends Plugin {
     const updateBytes = Y.encodeStateAsUpdate(binding);
     if (updateBytes.length > 0) {
       this.sendMessage('UPDATE', { 
-        vault_id: this.settings.vaultKey.substring(0, 8),
+        vault_id: this.getVaultId(),
         path, 
         update: Array.from(updateBytes),
         isText: true
@@ -288,7 +292,7 @@ export default class SyncPlugin extends Plugin {
 
     try {
       const content = await this.app.vault.read(file);
-      this.sendMessage('UPDATE', { vault_id: this.settings.vaultKey.substring(0, 8), path, content });
+      this.sendMessage('UPDATE', { vault_id: this.getVaultId(), path, content });
     } catch (e) {
       console.error('Failed to get local content for sync:', e);
     }
