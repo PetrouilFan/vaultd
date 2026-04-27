@@ -37,7 +37,10 @@ export default class SyncPlugin extends Plugin {
     this.isSyncingRef = () => this.isSyncing;
     this.setSyncing = (v: boolean) => { this.isSyncing = v; };
 
-    // Restore offline queue from localStorage backup (in case IndexedDB was cleared)
+    // Initialize offline queue FIRST
+    this.offlineQueue = createOfflineQueue();
+
+    // Then restore from localStorage backup (in case IndexedDB was cleared)
     this.offlineQueue.restoreFromLocalStorage();
 
     this.addSettingTab(new SyncSettingTab(this.app, this));
@@ -49,10 +52,10 @@ export default class SyncPlugin extends Plugin {
   onunload(): void {
     // Backup queue before unload
     this.offlineQueue?.backupToLocalStorage();
+    this.offlineQueue?.clear();
     this.ws?.disconnect();
     this.crdtManager?.destroy();
     this.binarySync?.cleanup();
-    this.offlineQueue?.clear();
   }
 
   // Manual reconnect method
@@ -131,13 +134,15 @@ export default class SyncPlugin extends Plugin {
   }
 
   private updateStatusIndicator(): void {
+    if (!this.ws) return;
+    
     const pending = this.ws.getPendingCount();
     const isConnected = this.ws.isConnected();
     
     console.log(`[Vaultd] Status: ${isConnected ? 'Connected' : 'Offline'}, Pending: ${pending}`);
     
     // Update the offline queue backup
-    this.offlineQueue.backupToLocalStorage();
+    this.offlineQueue?.backupToLocalStorage();
   }
 
   private setupEventListeners(): void {
