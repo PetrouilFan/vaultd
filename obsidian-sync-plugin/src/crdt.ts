@@ -29,7 +29,6 @@ export class CRDTManager {
     this.onSendUpdate = config.onSendUpdate;
     this.onRemoteUpdate = config.onRemoteUpdate;
     this.gcInterval = config.gcInterval ?? 24 * 60 * 60 * 1000;
-    this.startPeriodicGC();
   }
 
   onFileOpen(path: string): Y.Doc {
@@ -144,17 +143,20 @@ export class CRDTManager {
   applyRemoteContent(path: string, content: string): void {
     let binding = this.docs.get(path);
     if (!binding) {
-      // No local doc, just create one with remote content
       this.updateDocument(path, content);
       return;
     }
 
-    // Simple last-write-wins for now
-    binding.doc.transact(() => {
-      const ytext = binding!.doc.getText('content');
-      ytext.delete(0, ytext.length);
-      ytext.insert(0, content);
-    }, 'remote');
+    // True CRDT merge: create remote doc, get update, apply to local
+    const remoteDoc = new Y.Doc();
+    const remoteText = remoteDoc.getText('content');
+    remoteText.insert(0, content);
+    
+    // Get the state update from remote doc
+    const update = Y.encodeStateAsUpdate(remoteDoc);
+    
+    // Apply to local doc - CRDT handles merge automatically
+    Y.applyUpdate(binding.doc, update, 'remote');
   }
 
   applyRemoteUpdate(path: string, update: Uint8Array): void {
@@ -198,58 +200,75 @@ export class CRDTManager {
     this.docs.set(newPath, newBinding);
   }
 
-  destroyDocumentBinding(path: string): void {
+destroyDocumentBinding(path: string): void {
     const binding = this.docs.get(path);
-    if (!binding) return;
-    binding.doc.off('update', binding.updateHandler);
-    binding.doc.destroy();
-    this.docs.delete(path);
+    if (binding) {
+      this.flushToDisk(path).catch(console.error);
+      binding.doc.off('update', binding.updateHandler);
+      this.docs.delete(path);
+    }
   }
 
-  private startPeriodicGC(): void {
-    if (this.gcInterval <= 0) return;
-    this.gcTimer = setInterval(() => {
-      this.performGC();
-    }, this.gcInterval);
-  }
-
-  private performGC(): void {
-    for (const [path, binding] of this.docs.entries()) {
-      if (binding.isOpen) continue;
-
-      try {
-        const snapshot = Y.encodeStateAsUpdate(binding.doc);
-        const newDoc = new Y.Doc();
-        newDoc.gc = true;
-        Y.applyUpdate(newDoc, snapshot);
-        binding.doc.destroy();
-        binding.doc = newDoc;
-        binding.doc.on('update', binding.updateHandler);
-      } catch (err) {
-        console.error('[CRDT] GC error for', path, err);
+  // Persist all CRDT state to IndexedDB
+  async persistAllState(db: IDBDatabase): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('crdt_state', 'readwrite');
+      const store = tx.objectStore('crdt_state');
+      
+      for (const [path, binding] of this.docs) {
+        const state = Y.encodeStateAsUpdate(binding.doc);
+        store.put({
+          path,
+          state: Array.from(state),
+          timestamp: Date.now(),
+        });
       }
-    }
+      
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
   }
 
-  async destroy(): Promise<void> {
-    if (this.gcTimer) clearInterval(this.gcTimer);
-    const closePromises: Promise<void>[] = [];
-    for (const path of this.docs.keys()) {
-      closePromises.push(this.evictFromMemory(path));
-    }
-    await Promise.all(closePromises);
-    this.docs.clear();
-  }
-
-  private async evictFromMemory(path: string): Promise<void> {
-    const binding = this.docs.get(path);
-    if (!binding) return;
-    if (!binding.isOpen) {
-      await this.flushToDisk(path);
-    }
-    binding.doc.off('update', binding.updateHandler);
-    binding.doc.destroy();
-    this.docs.delete(path);
+  // Load CRDT state from IndexedDB
+  async loadPersistedState(db: IDBDatabase): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('crdt_state', 'readonly');
+      const store = tx.objectStore('crdt_state');
+      const request = store.getAll();
+      
+      request.onsuccess = () => {
+        const records = request.result as Array<{ path: string; state: number[] }>;
+        for (const record of records) {
+          const update = new Uint8Array(record.state);
+          let binding = this.docs.get(record.path);
+          
+          if (!binding) {
+            const doc = new Y.Doc();
+            doc.gc = true;
+            const updateHandler = (update: Uint8Array, origin: any) => {
+              if (origin === 'remote') return;
+              this.onSendUpdate(record.path, update);
+            };
+            doc.on('update', updateHandler);
+            binding = {
+              doc,
+              path: record.path,
+              isOpen: false,
+              lastFlushTime: Date.now(),
+              updateHandler,
+            };
+            this.docs.set(record.path, binding);
+          }
+          
+          if (update.length > 0) {
+            Y.applyUpdate(binding.doc, update, 'remote');
+          }
+        }
+        resolve();
+      };
+      
+      request.onerror = () => reject(request.error);
+    });
   }
 }
 

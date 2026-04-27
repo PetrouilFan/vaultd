@@ -107,6 +107,10 @@ export class SyncClient {
     if (!db.objectStoreNames.contains('state')) {
       db.createObjectStore('state', { keyPath: 'key' });
     }
+    if (!db.objectStoreNames.contains('crdt_state')) {
+      const store = db.createObjectStore('crdt_state', { keyPath: 'path' });
+      store.createIndex('timestamp', 'timestamp', { unique: false });
+    }
   }
 
   isConnected(): boolean {
@@ -115,6 +119,14 @@ export class SyncClient {
 
   getPendingCount(): number {
     return this.messageQueue.length;
+  }
+
+  getDatabase(): IDBDatabase | null {
+    return this.db;
+  }
+
+  getDatabaseReady(): Promise<void> {
+    return this.dbReady;
   }
 
   // Force reconnect - useful for manual retry

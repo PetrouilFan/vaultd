@@ -232,7 +232,12 @@ tokio::spawn(async move {
                 
                 let json_bytes = serde_json::to_vec(&msg).map_err(|e| RelayError::SerializeError(e.to_string()))?;
                 
-let _ = self.broadcast_to_vault_json(&vault_id, &session.client_id, json_bytes).await;
+                let _ = self.broadcast_to_vault_json(&vault_id, &session.client_id, json_bytes).await;
+                
+                // Persist operation to oplog for durability
+                if !path.is_empty() {
+                    let _ = self.apply_update_to_doc(&path, session.client_id.clone()).await;
+                }
             }
             "HANDSHAKE" => {
                 #[derive(serde::Deserialize)]
@@ -293,6 +298,11 @@ let _ = self.broadcast_to_vault_json(&vault_id, &session.client_id, json_bytes).
                 
                 let json_bytes = serde_json::to_vec(&broadcast_msg).map_err(|e| RelayError::SerializeError(e.to_string()))?;
                 let _ = self.broadcast_to_vault_json(&vault_id, &session.client_id, json_bytes).await;
+                
+                // Persist operation to oplog
+                if !path.is_empty() {
+                    let _ = self.apply_update_to_doc(&path, session.client_id.clone()).await;
+                }
             }
             "DELETE" => {
                 let payload = msg.get("payload").and_then(|p| p.as_object()).cloned();
@@ -327,6 +337,11 @@ let _ = self.broadcast_to_vault_json(&vault_id, &session.client_id, json_bytes).
                 
                 let json_bytes = serde_json::to_vec(&broadcast_msg).map_err(|e| RelayError::SerializeError(e.to_string()))?;
                 let _ = self.broadcast_to_vault_json(&vault_id, &session.client_id, json_bytes).await;
+                
+                // Persist operation to oplog
+                if !path.is_empty() {
+                    let _ = self.apply_update_to_doc(&path, session.client_id.clone()).await;
+                }
             }
             "RENAME" => {
                 let payload = msg.get("payload").and_then(|p| p.as_object()).cloned();
@@ -367,6 +382,11 @@ let _ = self.broadcast_to_vault_json(&vault_id, &session.client_id, json_bytes).
                 
                 let json_bytes = serde_json::to_vec(&broadcast_msg).map_err(|e| RelayError::SerializeError(e.to_string()))?;
                 let _ = self.broadcast_to_vault_json(&vault_id, &session.client_id, json_bytes).await;
+                
+                // Persist operation to oplog
+                if !new_path.is_empty() {
+                    let _ = self.apply_update_to_doc(&new_path, session.client_id.clone()).await;
+                }
             }
             "SUBSCRIBE" => {
                 let payload: SubscribeMsg = serde_json::from_value(msg.clone())

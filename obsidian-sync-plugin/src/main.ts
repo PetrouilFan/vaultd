@@ -127,9 +127,37 @@ export default class SyncPlugin extends Plugin {
       console.log('[Vaultd] Connected successfully!');
       new Notice('Tailnet Sync connected');
       this.processOfflineQueue();
+      
+      // Load persisted CRDT state after connect
+      await this.loadCRDTState();
     } catch (e) {
       console.error('[Vaultd] Failed to connect to sync server:', e);
       new Notice('Failed to connect to sync server');
+    }
+  }
+
+  private async loadCRDTState(): Promise<void> {
+    try {
+      await this.ws.getDatabaseReady();
+      const db = this.ws.getDatabase();
+      if (db) {
+        await this.crdtManager.loadPersistedState(db);
+        console.log('[Vaultd] CRDT state loaded from IndexedDB');
+      }
+    } catch (e) {
+      console.error('[Vaultd] Failed to load CRDT state:', e);
+    }
+  }
+
+  private async saveCRDTState(): Promise<void> {
+    if (!this.ws) return;
+    try {
+      const db = this.ws.getDatabase();
+      if (db) {
+        await this.crdtManager.persistAllState(db);
+      }
+    } catch (e) {
+      console.error('[Vaultd] Failed to persist CRDT state:', e);
     }
   }
 
@@ -143,6 +171,11 @@ export default class SyncPlugin extends Plugin {
     
     // Update the offline queue backup
     this.offlineQueue?.backupToLocalStorage();
+    
+    // Periodically persist CRDT state
+    if (isConnected) {
+      this.saveCRDTState();
+    }
   }
 
   private setupEventListeners(): void {
