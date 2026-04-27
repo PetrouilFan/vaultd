@@ -255,88 +255,118 @@ let _ = self.broadcast_to_vault_json(&vault_id, &session.client_id, json_bytes).
                 self.send_handshake(&payload.vault_id, payload.last_seq, session).await?;
             }
             "CREATE" => {
-                #[derive(serde::Deserialize)]
-                struct CreateMsg {
-                    #[serde(default)]
-                    vault_id: String,
-                    path: String,
-                    #[serde(default)]
-                    content: String,
+                let payload = msg.get("payload").and_then(|p| p.as_object()).cloned();
+                
+                let vault_id = payload.as_ref()
+                    .and_then(|p| p.get("vault_id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let path = payload.as_ref()
+                    .and_then(|p| p.get("path"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let content = payload.as_ref()
+                    .and_then(|p| p.get("content"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                
+                if !vault_id.is_empty() {
+                    session.subscribed_vaults.write().insert(vault_id.clone());
                 }
-                let payload: CreateMsg = serde_json::from_value(msg.clone())
-                    .unwrap_or(CreateMsg { vault_id: "".to_string(), path: "".to_string(), content: "".to_string() });
                 
-                if !payload.vault_id.is_empty() {
-                    session.subscribed_vaults.write().insert(payload.vault_id.clone());
-                }
+                info!(client_id = %session.client_id, vault = %vault_id, path = %path, "create");
                 
-                info!(client_id = %session.client_id, vault = %payload.vault_id, path = %payload.path, "create");
-                
-                let msg = serde_json::json!({
+                let broadcast_msg = serde_json::json!({
                     "type": "CREATE",
                     "client_id": session.client_id,
                     "vault_key": "",
                     "vector_clock": 0,
                     "payload": {
-                        "vault_id": payload.vault_id,
-                        "path": payload.path,
-                        "content": payload.content,
+                        "vault_id": vault_id,
+                        "path": path,
+                        "content": content,
                     }
                 });
                 
-                let json_bytes = serde_json::to_vec(&msg).map_err(|e| RelayError::SerializeError(e.to_string()))?;
-                let _ = self.broadcast_to_vault_json(&payload.vault_id, &session.client_id, json_bytes).await;
+                let json_bytes = serde_json::to_vec(&broadcast_msg).map_err(|e| RelayError::SerializeError(e.to_string()))?;
+                let _ = self.broadcast_to_vault_json(&vault_id, &session.client_id, json_bytes).await;
             }
             "DELETE" => {
-                let payload: DeleteMsg = serde_json::from_value(msg.clone())
-                    .unwrap_or(DeleteMsg { vault_id: "".to_string(), path: "".to_string() });
+                let payload = msg.get("payload").and_then(|p| p.as_object()).cloned();
                 
-                // Auto-subscribe client to vault
-                if !payload.vault_id.is_empty() {
-                    session.subscribed_vaults.write().insert(payload.vault_id.clone());
+                let vault_id = payload.as_ref()
+                    .and_then(|p| p.get("vault_id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let path = payload.as_ref()
+                    .and_then(|p| p.get("path"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                
+                if !vault_id.is_empty() {
+                    session.subscribed_vaults.write().insert(vault_id.clone());
                 }
                 
-                info!(client_id = %session.client_id, vault = %payload.vault_id, path = %payload.path, "delete");
+                info!(client_id = %session.client_id, vault = %vault_id, path = %path, "delete");
                 
-                let msg = serde_json::json!({
+                let broadcast_msg = serde_json::json!({
                     "type": "DELETE",
                     "client_id": session.client_id,
                     "vault_key": "",
                     "vector_clock": 0,
                     "payload": {
-                        "vault_id": payload.vault_id,
-                        "path": payload.path,
+                        "vault_id": vault_id,
+                        "path": path,
                     }
                 });
                 
-                let json_bytes = serde_json::to_vec(&msg).map_err(|e| RelayError::SerializeError(e.to_string()))?;
-                let _ = self.broadcast_to_vault_json(&payload.vault_id, &session.client_id, json_bytes).await;
+                let json_bytes = serde_json::to_vec(&broadcast_msg).map_err(|e| RelayError::SerializeError(e.to_string()))?;
+                let _ = self.broadcast_to_vault_json(&vault_id, &session.client_id, json_bytes).await;
             }
             "RENAME" => {
-                let payload: RenameMsg = serde_json::from_value(msg.clone())
-                    .unwrap_or(RenameMsg { vault_id: "".to_string(), old_path: "".to_string(), new_path: "".to_string() });
+                let payload = msg.get("payload").and_then(|p| p.as_object()).cloned();
                 
-                // Auto-subscribe client to vault
-                if !payload.vault_id.is_empty() {
-                    session.subscribed_vaults.write().insert(payload.vault_id.clone());
+                let vault_id = payload.as_ref()
+                    .and_then(|p| p.get("vault_id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let old_path = payload.as_ref()
+                    .and_then(|p| p.get("old_path"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let new_path = payload.as_ref()
+                    .and_then(|p| p.get("new_path"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                
+                if !vault_id.is_empty() {
+                    session.subscribed_vaults.write().insert(vault_id.clone());
                 }
                 
-                info!(client_id = %session.client_id, vault = %payload.vault_id, old = %payload.old_path, new = %payload.new_path, "rename");
+                info!(client_id = %session.client_id, vault = %vault_id, old = %old_path, new = %new_path, "rename");
                 
-                let msg = serde_json::json!({
+                let broadcast_msg = serde_json::json!({
                     "type": "RENAME",
                     "client_id": session.client_id,
                     "vault_key": "",
                     "vector_clock": 0,
                     "payload": {
-                        "vault_id": payload.vault_id,
-                        "old_path": payload.old_path,
-                        "new_path": payload.new_path,
+                        "vault_id": vault_id,
+                        "old_path": old_path,
+                        "new_path": new_path,
                     }
                 });
                 
-                let json_bytes = serde_json::to_vec(&msg).map_err(|e| RelayError::SerializeError(e.to_string()))?;
-                let _ = self.broadcast_to_vault_json(&payload.vault_id, &session.client_id, json_bytes).await;
+                let json_bytes = serde_json::to_vec(&broadcast_msg).map_err(|e| RelayError::SerializeError(e.to_string()))?;
+                let _ = self.broadcast_to_vault_json(&vault_id, &session.client_id, json_bytes).await;
             }
             "SUBSCRIBE" => {
                 let payload: SubscribeMsg = serde_json::from_value(msg.clone())
