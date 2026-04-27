@@ -326,29 +326,66 @@ private async handleRemoteUpdate(message: SyncMessage): Promise<void> {
     this.isSyncing = true;
 
     try {
+      // Check if this is a CRDT update (has update array)
       if (payload.update && Array.isArray(payload.update)) {
         console.log('[Vaultd] CRDT update, size:', payload.update.length);
         const updateBytes = new Uint8Array(payload.update);
-        if (this.crdtManager.hasDocument(path)) {
-          this.crdtManager.applyRemoteUpdate(path, updateBytes);
-        } else {
-          const doc = new Y.Doc();
-          Y.applyUpdate(doc, updateBytes, 'remote');
-          const content = doc.getText('content').toString();
-          this.crdtManager.updateDocument(path, content);
+        
+        // Initialize CRDT doc if doesn't exist
+        if (!this.crdtManager.hasDocument(path)) {
+          // Read current local content to initialize CRDT
+          let localContent = '';
+          if (file instanceof TFile) {
+            try {
+              localContent = await this.app.vault.read(file);
+            } catch (e) {}
+          }
+          this.crdtManager.updateDocument(path, localContent);
         }
+        
+        // Apply the CRDT update
+        this.crdtManager.applyRemoteUpdate(path, updateBytes);
+        
+        // Get merged content and write
         const content = this.crdtManager.getDocumentString(path);
         if (content !== null) {
           await this.writeRemoteContent(path, content);
         }
-      } else if (payload.content !== undefined) {
-        console.log('[Vaultd] Plain text update:', payload.content.substring(0, 50));
-        // Plain text content
+      } 
+      // If there's plain content without CRDT update, use CRDT to merge
+      else if (payload.content !== undefined) {
+        console.log('[Vaultd] Plain text update, using CRDT merge:', payload.content.substring(0, 50));
         const remoteContent = payload.content as string;
-        if (this.crdtManager.hasDocument(path)) {
-          this.crdtManager.applyRemoteContent(path, remoteContent);
+        
+        // Initialize CRDT doc if doesn't exist
+        if (!this.crdtManager.hasDocument(path)) {
+          let localContent = '';
+          if (file instanceof TFile) {
+            try {
+              localContent = await this.app.vault.read(file);
+            } catch (e) {}
+          }
+          this.crdtManager.updateDocument(path, localContent);
         }
-        this.writeRemoteContent(path, remoteContent);
+        
+        // Use CRDT to apply remote content (creates a full doc update)
+        const remoteDoc = new Y.Doc();
+        const ytext = remoteDoc.getText('content');
+        ytext.insert(0, remoteContent);
+        const updateBytes = Y.encodeStateAsUpdate(remoteDoc);
+        
+        // Apply to local CRDT doc
+        if (this.crdtManager.hasDocument(path)) {
+          this.crdtManager.applyRemoteUpdate(path, updateBytes);
+        } else {
+          this.crdtManager.updateDocument(path, remoteContent);
+        }
+        
+        // Get merged content and write
+        const content = this.crdtManager.getDocumentString(path);
+        if (content !== null) {
+          await this.writeRemoteContent(path, content);
+        }
       } else {
         console.log('[Vaultd] No update data found!');
       }
@@ -400,8 +437,22 @@ private async handleRemoteUpdate(message: SyncMessage): Promise<void> {
     try {
       const existingFile = this.app.vault.getAbstractFileByPath(path);
       if (existingFile instanceof TFile) {
-        console.log('[Vaultd] File already exists, updating:', path);
-        await this.app.vault.modify(existingFile, content);
+        console.log('[Vaultd] File already exists, merging with CRDT:', path);
+        // File exists - use CRDT to merge remote content with local
+        if (!this.crdtManager.hasDocument(path)) {
+          const localContent = await this.app.vault.read(existingFile);
+          this.crdtManager.updateDocument(path, localContent);
+        }
+        // Create CRDT update from remote content
+        const remoteDoc = new Y.Doc();
+        const ytext = remoteDoc.getText('content');
+        ytext.insert(0, content);
+        const updateBytes = Y.encodeStateAsUpdate(remoteDoc);
+        this.crdtManager.applyRemoteUpdate(path, updateBytes);
+        const mergedContent = this.crdtManager.getDocumentString(path);
+        if (mergedContent !== null) {
+          await this.writeRemoteContent(path, mergedContent);
+        }
       } else {
         console.log('[Vaultd] Creating new file:', path);
         await this.app.vault.create(path, content);
