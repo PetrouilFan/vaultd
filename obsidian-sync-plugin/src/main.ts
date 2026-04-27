@@ -37,6 +37,9 @@ export default class SyncPlugin extends Plugin {
     this.isSyncingRef = () => this.isSyncing;
     this.setSyncing = (v: boolean) => { this.isSyncing = v; };
 
+    // Restore offline queue from localStorage backup (in case IndexedDB was cleared)
+    this.offlineQueue.restoreFromLocalStorage();
+
     this.addSettingTab(new SyncSettingTab(this.app, this));
 
     // CRITICAL: must be after onLayoutReady on mobile
@@ -44,10 +47,18 @@ export default class SyncPlugin extends Plugin {
   }
 
   onunload(): void {
+    // Backup queue before unload
+    this.offlineQueue?.backupToLocalStorage();
     this.ws?.disconnect();
     this.crdtManager?.destroy();
     this.binarySync?.cleanup();
     this.offlineQueue?.clear();
+  }
+
+  // Manual reconnect method
+  async reconnect(): Promise<void> {
+    new Notice('Attempting to reconnect...');
+    this.ws?.forceReconnect();
   }
 
   private async loadSettings(): Promise<void> {
@@ -97,7 +108,15 @@ export default class SyncPlugin extends Plugin {
     this.ws.onMessage((message) => this.handleIncomingMessage(message));
     this.ws.onDisconnect(() => {
       new Notice('Disconnected from sync server — offline mode');
+      this.updateStatusIndicator();
     });
+    this.ws.onConnect(() => {
+      new Notice('Tailnet Sync connected');
+      this.updateStatusIndicator();
+    });
+
+    // Start periodic status update
+    setInterval(() => this.updateStatusIndicator(), 5000);
 
     try {
       console.log('[Vaultd] Attempting to connect to:', this.settings.serverUrl);
@@ -109,6 +128,16 @@ export default class SyncPlugin extends Plugin {
       console.error('[Vaultd] Failed to connect to sync server:', e);
       new Notice('Failed to connect to sync server');
     }
+  }
+
+  private updateStatusIndicator(): void {
+    const pending = this.ws.getPendingCount();
+    const isConnected = this.ws.isConnected();
+    
+    console.log(`[Vaultd] Status: ${isConnected ? 'Connected' : 'Offline'}, Pending: ${pending}`);
+    
+    // Update the offline queue backup
+    this.offlineQueue.backupToLocalStorage();
   }
 
   private setupEventListeners(): void {

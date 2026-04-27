@@ -43,6 +43,19 @@ export class SyncClient {
     this.vaultKey = config.vaultKey;
     this.settings = config.settings;
     this.dbReady = this.initIndexedDB();
+    
+    // Listen for network restore
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', () => {
+        console.log('[SyncClient] Network restored, attempting reconnect...');
+        if (!this.isConnected()) {
+          this.reconnectAttempts = 0;
+          this.connect().catch((err) => {
+            console.error('[SyncClient] Auto-reconnect failed:', err);
+          });
+        }
+      });
+    }
   }
 
   private async initIndexedDB(): Promise<void> {
@@ -98,6 +111,21 @@ export class SyncClient {
 
   isConnected(): boolean {
     return this._isConnected;
+  }
+
+  getPendingCount(): number {
+    return this.messageQueue.length;
+  }
+
+  // Force reconnect - useful for manual retry
+  async forceReconnect(): Promise<void> {
+    console.log('[SyncClient] Force reconnect requested');
+    this.reconnectAttempts = 0;
+    if (this.ws) {
+      this.ws.close(1000, 'Force reconnect');
+      this.ws = null;
+    }
+    await this.connect();
   }
 
   async connect(): Promise<void> {
@@ -415,22 +443,15 @@ export class SyncClient {
   private scheduleReconnect(): void {
     this.clearReconnectTimer();
 
-    const maxReconnectAttempts = 10;
+    // Unlimited reconnect attempts - never give up
     const baseDelay = 1000;
     const maxDelay = 60000;
-    const delay = Math.min(baseDelay * Math.pow(2, this.reconnectAttempts), maxDelay);
+    const delay = Math.min(baseDelay * Math.pow(2, Math.min(this.reconnectAttempts, 10)), maxDelay);
 
-    if (this.reconnectAttempts >= maxReconnectAttempts) {
-      console.error(`[SyncClient] Max reconnect attempts (${maxReconnectAttempts}) reached. Giving up.`);
-      this._isConnected = false;
-      this.disconnectCallbacks.forEach((cb) => cb('max attempts reached'));
-      return;
-    }
-
-    console.log(`[SyncClient] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts + 1}/${maxReconnectAttempts})`);
+    console.log(`[SyncClient] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts + 1}, unlimited)`);
+    this.reconnectAttempts++;
 
     this.reconnectTimer = window.setTimeout(() => {
-      this.reconnectAttempts++;
       this.connect().catch((err) => {
         console.error('[SyncClient] Reconnect failed:', err);
       });

@@ -124,13 +124,34 @@ export class SyncSettingTab extends PluginSettingTab {
       cls: 'sync-status-indicator',
     });
 
+    const pendingSpan = statusDiv.createEl('span', {
+      text: ' | Pending: 0',
+      cls: 'sync-pending-indicator',
+    });
+
+    // Reconnect button
+    new Setting(containerEl)
+      .setName('Reconnect')
+      .setDesc('Force reconnect to sync server')
+      .addButton((button) =>
+        button.setButtonText('Reconnect').onClick(async () => {
+          await (this.plugin as any).reconnect();
+        })
+      );
+
     // Poll status every 2s
     setInterval(() => {
       const connected = (this.plugin as any)?.ws?.isConnected?.();
+      const pending = (this.plugin as any)?.ws?.getPendingCount?.() || 0;
       statusSpan.textContent = connected ? 'Connected' : 'Disconnected';
       statusSpan.setAttr(
         'style',
         `color: ${connected ? 'var(--color-green)' : 'var(--color-orange)'}`
+      );
+      pendingSpan.textContent = ` | Pending: ${pending}`;
+      pendingSpan.setAttr(
+        'style',
+        `color: ${pending > 0 ? 'var(--color-orange)' : 'var(--text-muted)'}`
       );
     }, 2000);
   }
